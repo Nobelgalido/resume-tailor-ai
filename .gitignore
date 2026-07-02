@@ -17,3 +17,9 @@ obj/
 
 # Serena MCP local project data
 .serena/
+
+# Personal example resume (not part of the app; used only as a local formatting reference)
+Alfred_Galido_Resume_JrDeveloperSupport.pdf
+
+# Superseded by the prompt baked into ResumeTailorPipeline.cs
+ats-resume-prompt.md

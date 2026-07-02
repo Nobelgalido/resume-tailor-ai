@@ -48,8 +48,15 @@ public class GeminiChatCompletionService : IChatCompletionService
         var body = await response.Content.ReadAsStringAsync(ct);
 
         if (!response.IsSuccessStatusCode)
+        {
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                throw new GeminiRateLimitException(
+                    "Gemini API rate limit reached — the quota for this API key has been used up. " +
+                    "Wait a bit and try again, or check your usage at https://aistudio.google.com/app/apikey.");
+
             throw new HttpRequestException(
                 $"Gemini API returned {(int)response.StatusCode}. {Truncate(body, 400)}");
+        }
 
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
@@ -73,4 +80,13 @@ public class GeminiChatCompletionService : IChatCompletionService
 
     private static string Truncate(string value, int max) =>
         value.Length <= max ? value : value[..max] + "…";
+}
+
+/// <summary>
+/// Thrown when Gemini responds with 429 (quota/rate limit exceeded), so callers can
+/// show a specific, friendlier message instead of a raw API error body.
+/// </summary>
+public class GeminiRateLimitException : Exception
+{
+    public GeminiRateLimitException(string message) : base(message) { }
 }

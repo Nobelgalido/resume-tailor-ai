@@ -13,6 +13,11 @@ Paste a resume and a job posting; three agents run in sequence and hand off to e
 The pipeline's progress is shown live in the UI, and each agent's intermediate reasoning is
 available under a disclosure so the output is never a black box.
 
+You can paste your resume as plain text/markdown, or **upload a PDF** and have the text
+extracted automatically into the editable textarea. The tailored result can be copied as
+markdown or **downloaded as a formatted PDF** — a clean, single-column, ATS-style document
+generated in memory (nothing is ever written to disk).
+
 > This is the C#/.NET rebuild of an earlier Python + Streamlit version, redone in the ASP.NET
 > ecosystem as a deployable portfolio piece.
 
@@ -23,15 +28,20 @@ available under a disclosure so the output is never a black box.
 | Web / UI   | ASP.NET Core 8, Blazor (interactive server components) |
 | API        | Minimal API (`POST /api/tailor`) sharing the same pipeline |
 | AI         | Gemini via `HttpClient` (no SDK) behind an `IChatCompletionService` interface |
+| PDF        | **iText7** (upload text extraction + tailored-resume PDF export), **Markdig** (markdown parsing/rendering) |
 | Data       | EF Core — SQLite by default, one config flip to SQL Server |
-| Hardening  | Built-in rate limiting (10 req/min/IP), forwarded-headers, anonymous request logging |
+| Hardening  | Shared rate limiting (10 req/min/client, enforced identically for the UI and API), forwarded-headers, anonymous request logging |
 | Packaging  | Multi-stage `Dockerfile` (deploys anywhere) |
+
+> iText7 is used under its AGPL license, which is free for this public open-source project;
+> a commercial license would only be required for closed-source use.
 
 ## Architecture
 
 ```
 Browser ──▶ Blazor page (Home.razor)
                  │  injects
+                 │  PDF upload ──▶ PdfResumeTextExtractor ──▶ resume textarea
                  ▼
          IResumeTailorPipeline ──▶ IChatCompletionService ──▶ Gemini REST
                  │                        (Gemini impl)
@@ -39,6 +49,7 @@ Browser ──▶ Blazor page (Home.razor)
                  ├─ Agent 2: Strategize
                  └─ Agent 3: Rewrite
                  │
+                 ├─ tailored resume ──▶ MarkdownPdfRenderer ──▶ "Download PDF"
                  ▼
          TailorLogService ──▶ EF Core ──▶ SQLite / SQL Server
                  ▲
@@ -47,6 +58,14 @@ POST /api/tailor ┘  (same pipeline, rate limited)
 
 The AI provider sits behind `IChatCompletionService`, so swapping Gemini for Claude or OpenAI
 is a new implementation and one line in `Program.cs` — the pipeline never changes.
+
+Both PDF features operate purely at the UI edges — `TailorRequest`, `TailorResult`,
+`IResumeTailorPipeline`, and `/api/tailor` are untouched by them, and no PDF ever touches
+disk (extraction and rendering both run entirely in memory).
+
+If Gemini responds with a rate-limit error (HTTP 429), the pipeline surfaces a specific,
+stage-tagged message (e.g. *"Rate limit hit during the 'Rewrite' step…"*) instead of a raw
+API error, via a dedicated `GeminiRateLimitException`.
 
 ## Run it locally
 
@@ -101,7 +120,8 @@ curl -X POST https://your-app.example.com/api/tailor \
 ```
 
 Returns the tailored resume plus both intermediate agent outputs, model name, and timing.
-Rate limited to 10 requests per minute per IP.
+`resume` and `jobDescription` are each capped at 20,000 characters, and requests are rate
+limited to 10 per minute per client (same shared budget as the Blazor UI).
 
 ## Privacy
 

@@ -142,6 +142,8 @@ a:hover { color: var(--accent); }
 
 .field { display: flex; flex-direction: column; gap: 9px; }
 
+.field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
 .field-label {
     font-family: var(--font-mono);
     font-size: 0.74rem;
@@ -149,6 +151,27 @@ a:hover { color: var(--accent); }
     text-transform: uppercase;
     color: var(--text-dim);
 }
+
+.upload-btn {
+    position: relative;
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    color: var(--accent-soft);
+    background: transparent;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 5px 12px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.upload-btn:hover { background: var(--accent); color: #fff; }
+.upload-btn input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+.upload-btn input[type="file"]:disabled { cursor: not-allowed; }
 
 .input {
     width: 100%;

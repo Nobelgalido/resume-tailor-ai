@@ -1,6 +1,4 @@
-using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using ResumeTailorAI.Web.Components;
 using ResumeTailorAI.Web.Data;
@@ -47,21 +45,10 @@ builder.Services.AddHttpClient<IChatCompletionService, GeminiChatCompletionServi
 builder.Services.AddScoped<IResumeTailorPipeline, ResumeTailorPipeline>();
 builder.Services.AddScoped<TailorLogService>();
 
-// Cap the public API at 10 requests/minute per client IP.
-builder.Services.AddRateLimiter(options =>
-{
-    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.AddPolicy("tailor", context =>
-    {
-        var key = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
-        {
-            PermitLimit = 10,
-            Window = TimeSpan.FromMinutes(1),
-            QueueLimit = 0
-        });
-    });
-});
+// Caps tailoring runs at 10/minute per client, shared by both the Blazor UI (Home.razor
+// calls TryAcquire directly) and the JSON API (TailorEndpoints) so the limit can't be
+// sidestepped just by using the web page instead of the API.
+builder.Services.AddSingleton<ClientRateLimiter>();
 
 var app = builder.Build();
 
@@ -88,7 +75,6 @@ else
 
 app.UseStaticFiles();
 app.UseAntiforgery();
-app.UseRateLimiter();
 
 app.MapTailorEndpoints();
 

@@ -78,6 +78,19 @@ public class ResumeTailorPipeline : IResumeTailorPipeline
 
             result.Success = true;
         }
+        catch (GeminiRateLimitException ex)
+        {
+            _logger.LogWarning(ex, "Resume tailoring pipeline hit the Gemini rate limit");
+
+            var running = stages.FirstOrDefault(s => s.Status == StageStatus.Running);
+            if (running is not null) running.Status = StageStatus.Failed;
+
+            result.Success = false;
+            result.Error = running is not null
+                ? $"Rate limit hit during the \"{running.Name}\" step — the Gemini API quota for this key has been used up. Wait a bit and try again."
+                : "Rate limit hit — the Gemini API quota for this key has been used up. Wait a bit and try again.";
+            await Notify();
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Resume tailoring pipeline failed");
@@ -86,7 +99,9 @@ public class ResumeTailorPipeline : IResumeTailorPipeline
             if (running is not null) running.Status = StageStatus.Failed;
 
             result.Success = false;
-            result.Error = ex.Message;
+            result.Error = running is not null
+                ? $"The \"{running.Name}\" step failed: {ex.Message}"
+                : ex.Message;
             await Notify();
         }
         finally
@@ -120,13 +135,78 @@ public class ResumeTailorPipeline : IResumeTailorPipeline
         """;
 
     private const string RewritePrompt = """
-        You are an expert resume writer. Rewrite the candidate's resume to target this role,
-        using the analysis and strategy provided. Rules:
-        - Keep every claim truthful. Do NOT invent employers, titles, dates, degrees, or skills.
-        - Reorder and reword real experience to foreground what the role values.
-        - Weave in relevant ATS keywords naturally, only where they genuinely apply.
-        - Keep it ATS-friendly: clean markdown, standard section headings, no tables or columns.
-        - Preserve contact details exactly as given.
-        Output ONLY the finished resume in markdown, with no commentary before or after.
+        You are an expert resume writer specializing in ATS (Applicant Tracking System)
+        optimization. Tailor the candidate's resume for the target job, strictly following
+        these rules, using the job analysis and strategy provided.
+
+        FORMAT & LAYOUT
+        - Single-column, standard layout only. No graphics, columns, text boxes, headers,
+          footers, tables, or profile photos — these confuse ATS parsers, which read
+          top-to-bottom, left-to-right.
+        - Reverse-chronological order: most recent roles and education first.
+        - Use exactly these section headings, in ALL CAPS, in this order, and nothing
+          else: PROFESSIONAL SUMMARY, SKILLS, WORK EXPERIENCE, EDUCATION. Insert a
+          RELEVANT PROJECTS section after Work Experience, and/or a CERTIFICATIONS
+          section after Education, only if the candidate's original resume actually
+          has projects or certifications worth including. Do not rename, merge, or
+          get creative with these headings.
+
+        RESUME STRUCTURE (as markdown)
+        1. Header:
+           - Line 1: the candidate's full name as a level-1 heading, e.g. `# Jane Doe`.
+           - Line 2: a single plain paragraph (not a heading) with every contact detail
+             the candidate actually provided, separated by " | ", in this order where
+             available: location, phone, email, LinkedIn, GitHub, portfolio/website.
+             Never invent a contact detail that isn't in the original resume.
+             Make email, LinkedIn, GitHub, and portfolio links clickable using markdown
+             link syntax — human-readable label, real URL as the target — for example
+             `[jane@email.com](mailto:jane@email.com)` and
+             `[linkedin.com/in/janedoe](https://linkedin.com/in/janedoe)`.
+             Put line 1 and line 2 immediately adjacent with NO blank line between them,
+             so they stay visually tight together as one compact header block.
+        2. PROFESSIONAL SUMMARY — a 2-3 sentence paragraph highlighting the candidate's
+           experience and top skills relevant to this role.
+        3. SKILLS — a bulleted list of 5-10 skills grouped by category, matched
+           directly to keywords in the job posting where the candidate genuinely has
+           them. Format each bullet as `**Category:** skill, skill, skill`.
+        4. WORK EXPERIENCE — for each role, in this exact pattern:
+           - A bold line with just the job title, e.g. `**Job Title**`.
+           - Directly on the next line, with NO blank line in between, an italic line
+             with company, location, and dates, e.g.
+             `*Company Name — Location | Month Year – Month Year*`.
+           - Bullet points using strong action verbs, leading with quantifiable impact
+             (e.g. "reduced load time 20%", "$10k saved") rather than daily duties.
+        5. RELEVANT PROJECTS (only if applicable) — same bold/italic pattern as Work
+           Experience: bold project name, then directly on the next line (no blank
+           line between) an italic tech-stack/link line, then bullets.
+        6. EDUCATION — a bold line with the degree, then directly on the next line
+           (no blank line between) an italic line with institution, location, and
+           dates.
+        7. CERTIFICATIONS (only if applicable) — a bulleted list of certification
+           name, issuer, and year.
+
+        Within every bold-title / italic-subtitle pair above (Header, each Work
+        Experience entry, each Project, Education), the two lines must be part of the
+        SAME paragraph — separated only by a single newline, never by a blank line —
+        so they render as one tight visual unit rather than two separately-spaced
+        blocks.
+
+        CONTENT STRATEGY
+        - Keywords: copy hard skills and terminology directly from the job posting into
+          the resume wherever they truthfully apply, using the posting's own phrasing.
+        - Acronyms: spell out each acronym and include the abbreviation alongside it on
+          first use (e.g. "Search Engine Optimization (SEO)").
+        - Reorder and reword real experience to foreground what the role values most.
+
+        CONSTRAINTS
+        - Do not fabricate employers, titles, dates, degrees, skills, or metrics —
+          represent the candidate honestly. Only use what is in the original resume.
+        - Keep it to a single page worth of content unless the candidate's experience
+          clearly warrants more.
+        - Preserve contact details exactly as given, including real URLs for any
+          links, so they resolve correctly when rendered as clickable links.
+
+        Output ONLY the finished resume in markdown as described above, with no
+        commentary before or after.
         """;
 }

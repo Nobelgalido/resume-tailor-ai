@@ -1,9 +1,13 @@
 @page "/"
 @rendermode InteractiveServer
+@implements IDisposable
 @using Markdig
 @inject IResumeTailorPipeline Pipeline
 @inject TailorLogService LogService
+@inject ClientRateLimiter RateLimiter
+@inject PersistentComponentState AppState
 @inject IJSRuntime JS
+@inject ILogger<Home> Logger
 
 <PageTitle>Resume Tailor · AI</PageTitle>
 
@@ -19,17 +23,23 @@
 
 <div class="workspace">
     <div class="inputs">
-        <label class="field">
-            <span class="field-label">Your resume</span>
-            <textarea class="input" @bind="_request.Resume"
-                      placeholder="Paste your current resume as plain text or markdown…"
-                      rows="15" disabled="@_running"></textarea>
-        </label>
+        <div class="field">
+            <div class="field-head">
+                <label for="resume-input" class="field-label">Your resume</label>
+                <label class="upload-btn">
+                    @(_extractingPdf ? "Reading PDF…" : "Upload PDF")
+                    <InputFile OnChange="OnPdfSelected" accept=".pdf" disabled="@(_running || _extractingPdf)" />
+                </label>
+            </div>
+            <textarea id="resume-input" class="input" @bind="_request.Resume"
+                      placeholder="Paste your current resume as plain text or markdown, or upload a PDF above…"
+                      rows="15" maxlength="@TailorRequest.MaxFieldLength" disabled="@_running"></textarea>
+        </div>
         <label class="field">
             <span class="field-label">Job description</span>
             <textarea class="input" @bind="_request.JobDescription"
                       placeholder="Paste the full job posting…"
-                      rows="15" disabled="@_running"></textarea>
+                      rows="15" maxlength="@TailorRequest.MaxFieldLength" disabled="@_running"></textarea>
         </label>
     </div>
 
@@ -81,11 +91,18 @@
                 <div class="result-meta">
                     <span class="tag">@_result.Model</span>
                     <span class="tag">@FormatDuration(_result.DurationMs)</span>
-                    <button class="copy-btn" @onclick="CopyResult">
-                        @(_copied ? "Copied ✓" : "Copy markdown")
+                    <button class="copy-btn" @onclick="DownloadPdf" disabled="@_downloadingPdf">
+                        @(_downloadingPdf ? "Preparing…" : "Download PDF")
                     </button>
                 </div>
             </div>
+
+            @if (_downloadError is not null)
+            {
+                <div class="alert" role="alert">
+                    <span>@_downloadError</span>
+                </div>
+            }
 
             <article class="rendered">@((MarkupString)RenderMarkdown(_result.TailoredResume))</article>
 
@@ -108,7 +125,17 @@
     private TailorResult? _result;
     private string? _error;
     private bool _running;
-    private bool _copied;
+    private bool _extractingPdf;
+    private bool _downloadingPdf;
+    private string? _downloadError;
+
+    private const long MaxPdfBytes = 5 * 1024 * 1024;
+
+    private string? _clientIp;
+    private PersistingComponentStateSubscription _persistSubscription;
+
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
 
     private static readonly Markdig.MarkdownPipeline MarkdownPipeline =
     new Markdig.MarkdownPipelineBuilder()
@@ -118,6 +145,22 @@
     private bool CanRun =>
         !string.IsNullOrWhiteSpace(_request.Resume) &&
         !string.IsNullOrWhiteSpace(_request.JobDescription);
+
+    protected override void OnInitialized()
+    {
+        // HttpContext is only populated during the static prerender pass; flow the IP it
+        // gives us through to the interactive circuit via persisted state so the rate
+        // limiter can key on it consistently with the /api/tailor endpoint.
+        _persistSubscription = AppState.RegisterOnPersisting(() =>
+        {
+            AppState.PersistAsJson(nameof(_clientIp), _clientIp);
+            return Task.CompletedTask;
+        });
+
+        _clientIp = AppState.TryTakeFromJson<string?>(nameof(_clientIp), out var restoredIp)
+            ? restoredIp
+            : HttpContext?.Connection.RemoteIpAddress?.ToString();
+    }
 
     private async Task RunAsync()
     {
@@ -131,8 +174,24 @@
             return;
         }
 
+        if (_request.Resume.Length > TailorRequest.MaxFieldLength || _request.JobDescription.Length > TailorRequest.MaxFieldLength)
+        {
+            _error = $"Resume and job description must each be under {TailorRequest.MaxFieldLength:N0} characters.";
+            _result = null;
+            _stages = null;
+            return;
+        }
+
+        if (!RateLimiter.TryAcquire(_clientIp))
+        {
+            _error = "You've hit the rate limit — try again in a minute.";
+            _result = null;
+            _stages = null;
+            return;
+        }
+
         _running = true;
-        _copied = false;
+        _downloadError = null;
         _error = null;
         _result = null;
 
@@ -156,11 +215,72 @@
         StateHasChanged();
     }
 
-    private async Task CopyResult()
+    private async Task DownloadPdf()
     {
-        if (_result is null) return;
-        await JS.InvokeVoidAsync("navigator.clipboard.writeText", _result.TailoredResume);
-        _copied = true;
+        if (_result is null || _downloadingPdf) return;
+
+        _downloadingPdf = true;
+        _downloadError = null;
+        StateHasChanged();
+
+        try
+        {
+            var pdfBytes = await Task.Run(() => MarkdownPdfRenderer.Render(_result.TailoredResume, MarkdownPipeline));
+            var base64 = Convert.ToBase64String(pdfBytes);
+            await JS.InvokeVoidAsync("downloadFileFromBytes", "tailored-resume.pdf", "application/pdf", base64);
+        }
+        catch (Exception ex)
+        {
+            _downloadError = "Couldn't generate the PDF — try again.";
+            Logger.LogError(ex, "PDF export failed");
+        }
+        finally
+        {
+            _downloadingPdf = false;
+        }
+    }
+
+    private async Task OnPdfSelected(InputFileChangeEventArgs e)
+    {
+        if (_running || _extractingPdf) return;
+
+        if (!e.File.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            _error = "Couldn't read text from that PDF — try pasting it instead.";
+            return;
+        }
+
+        _extractingPdf = true;
+        _error = null;
+        StateHasChanged();
+
+        try
+        {
+            await using var upload = e.File.OpenReadStream(MaxPdfBytes);
+            using var buffer = new MemoryStream();
+            await upload.CopyToAsync(buffer);
+            buffer.Position = 0;
+
+            var text = await Task.Run(() => PdfResumeTextExtractor.TryExtractText(buffer));
+
+            if (text is null)
+            {
+                _error = "Couldn't read text from that PDF — try pasting it instead.";
+            }
+            else
+            {
+                _request.Resume = text;
+            }
+        }
+        catch
+        {
+            // Oversized file, unreadable stream, etc. — same friendly message either way.
+            _error = "Couldn't read text from that PDF — try pasting it instead.";
+        }
+        finally
+        {
+            _extractingPdf = false;
+        }
     }
 
     private static string RenderMarkdown(string markdown)
@@ -197,4 +317,6 @@
         StageStatus.Failed => "Failed",
         _ => "Queued"
     };
+
+    public void Dispose() => _persistSubscription.Dispose();
 }
