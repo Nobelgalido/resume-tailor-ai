@@ -102,6 +102,23 @@ same two requirements apply (enable session affinity on the container app).
 
 ---
 
+## Continuous deployment (Azure via GitHub Actions)
+
+`.github/workflows/azure-deploy.yml` builds and deploys to Azure App Service automatically
+on every push to `main`. It needs one secret:
+
+1. Get the app's publish profile:
+   ```bash
+   az webapp deployment list-publishing-profiles \
+     --name resume-tailor-galido --resource-group resume-tailor-rg --xml
+   ```
+2. In GitHub: **repo → Settings → Secrets and variables → Actions → New repository secret**
+   - Name: `AZURE_WEBAPP_PUBLISH_PROFILE`
+   - Value: the full XML output from step 1
+3. Push to `main` — the **Actions** tab shows the build/deploy run.
+
+If you rename the Web App, update `AZURE_WEBAPP_NAME` in the workflow file to match.
+
 ## After it's live — add it to your portfolio
 
 - Link the live URL and the GitHub repo from the projects section.
