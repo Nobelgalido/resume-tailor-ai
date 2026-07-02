@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/*.user
+**/*.db
+**/*.db-*
+.git/
+.gitignore
+README.md
+DEPLOY.md

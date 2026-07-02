@@ -1,0 +1,199 @@
+@page "/"
+@rendermode InteractiveServer
+@inject IResumeTailorPipeline Pipeline
+@inject TailorLogService LogService
+@inject IJSRuntime JS
+
+<PageTitle>Resume Tailor · AI</PageTitle>
+
+<section class="hero">
+    <p class="eyebrow">Three-agent pipeline · ASP.NET&nbsp;Core</p>
+    <h1>Tailor your resume to any job<br class="hero-break" /> in a single pass.</h1>
+    <p class="lede">
+        Paste your resume and a job description. Three agents read the role, map your
+        experience against it, and rewrite your resume to match — grounded in what you
+        actually did, never invented.
+    </p>
+</section>
+
+<div class="workspace">
+    <div class="inputs">
+        <label class="field">
+            <span class="field-label">Your resume</span>
+            <textarea class="input" @bind="_request.Resume"
+                      placeholder="Paste your current resume as plain text or markdown…"
+                      rows="15" disabled="@_running"></textarea>
+        </label>
+        <label class="field">
+            <span class="field-label">Job description</span>
+            <textarea class="input" @bind="_request.JobDescription"
+                      placeholder="Paste the full job posting…"
+                      rows="15" disabled="@_running"></textarea>
+        </label>
+    </div>
+
+    <div class="actions">
+        <button class="run-btn" @onclick="RunAsync" disabled="@_running">
+            @if (_running)
+            {
+                <span class="spinner" aria-hidden="true"></span>
+                <span>Tailoring…</span>
+            }
+            else
+            {
+                <span>Tailor my resume</span>
+            }
+        </button>
+        <span class="privacy-note">Nothing you paste is stored — only anonymous timing stats.</span>
+    </div>
+
+    @if (_stages is not null)
+    {
+        <ol class="pipeline" aria-label="Pipeline progress">
+            @foreach (var stage in _stages)
+            {
+                <li class="stage @StatusClass(stage.Status)">
+                    <span class="stage-num">@stage.Number.ToString("D2")</span>
+                    <div class="stage-body">
+                        <span class="stage-name">@stage.Name</span>
+                        <span class="stage-desc">@stage.Description</span>
+                    </div>
+                    <span class="stage-status">@StatusLabel(stage.Status)</span>
+                </li>
+            }
+        </ol>
+    }
+
+    @if (_error is not null)
+    {
+        <div class="alert" role="alert">
+            <strong>Couldn't finish.</strong>
+            <span>@_error</span>
+        </div>
+    }
+
+    @if (_result is { Success: true })
+    {
+        <div class="result">
+            <div class="result-head">
+                <h2>Tailored resume</h2>
+                <div class="result-meta">
+                    <span class="tag">@_result.Model</span>
+                    <span class="tag">@FormatDuration(_result.DurationMs)</span>
+                    <button class="copy-btn" @onclick="CopyResult">
+                        @(_copied ? "Copied ✓" : "Copy markdown")
+                    </button>
+                </div>
+            </div>
+
+            <article class="rendered">@((MarkupString)RenderMarkdown(_result.TailoredResume))</article>
+
+            <details class="reasoning">
+                <summary>See how the agents got there</summary>
+                <div class="reasoning-body">
+                    <h3>1 · Job analysis</h3>
+                    <article class="rendered dim">@((MarkupString)RenderMarkdown(_result.JobAnalysis))</article>
+                    <h3>2 · Tailoring strategy</h3>
+                    <article class="rendered dim">@((MarkupString)RenderMarkdown(_result.MatchStrategy))</article>
+                </div>
+            </details>
+        </div>
+    }
+</div>
+
+@code {
+    private readonly TailorRequest _request = new();
+    private List<PipelineStage>? _stages;
+    private TailorResult? _result;
+    private string? _error;
+    private bool _running;
+    private bool _copied;
+
+    private static readonly Markdig.MarkdownPipeline MarkdownPipeline =
+    new Markdig.MarkdownPipelineBuilder()
+        .UseAdvancedExtensions()
+        .Build();
+
+    private bool CanRun =>
+        !string.IsNullOrWhiteSpace(_request.Resume) &&
+        !string.IsNullOrWhiteSpace(_request.JobDescription);
+
+    private async Task RunAsync()
+    {
+        if (_running) return;
+
+        if (!CanRun)
+        {
+            _error = "Paste both your resume and a job description to start.";
+            _result = null;
+            _stages = null;
+            return;
+        }
+
+        _running = true;
+        _copied = false;
+        _error = null;
+        _result = null;
+
+        var stages = Pipeline.BuildStages().ToList();
+        _stages = stages;
+        StateHasChanged();
+
+        var result = await Pipeline.RunAsync(
+            _request,
+            stages,
+            onProgress: () => InvokeAsync(StateHasChanged));
+
+        _result = result;
+        if (!result.Success) _error = result.Error;
+        _running = false;
+
+        // Record anonymously; never let a logging hiccup break the user's result.
+        try { await LogService.RecordAsync(_request, result, clientIp: null); }
+        catch { /* best-effort telemetry */ }
+
+        StateHasChanged();
+    }
+
+    private async Task CopyResult()
+    {
+        if (_result is null) return;
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", _result.TailoredResume);
+        _copied = true;
+    }
+
+    private static string RenderMarkdown(string markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown)) return string.Empty;
+
+        var document = Markdig.Markdown.Parse(markdown, MarkdownPipeline);
+        using var writer = new StringWriter();
+        var renderer = new Markdig.Renderers.HtmlRenderer(writer)
+        {
+            EnableHtmlForBlock = false,
+            EnableHtmlForInline = false,
+        };
+        MarkdownPipeline.Setup(renderer);
+        renderer.Render(document);
+        return writer.ToString();
+    }
+
+    private static string FormatDuration(long ms) =>
+        ms < 1000 ? $"{ms} ms" : $"{ms / 1000.0:0.0} s";
+
+    private static string StatusClass(StageStatus s) => s switch
+    {
+        StageStatus.Running => "is-running",
+        StageStatus.Complete => "is-complete",
+        StageStatus.Failed => "is-failed",
+        _ => "is-pending"
+    };
+
+    private static string StatusLabel(StageStatus s) => s switch
+    {
+        StageStatus.Running => "Working",
+        StageStatus.Complete => "Done",
+        StageStatus.Failed => "Failed",
+        _ => "Queued"
+    };
+}

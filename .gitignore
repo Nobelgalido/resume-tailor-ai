@@ -1,0 +1,19 @@
+# .NET build output
+bin/
+obj/
+*.user
+
+# Visual Studio
+.vs/
+
+# Rider / VS Code
+.idea/
+*.suo
+
+# SQLite database created at runtime
+*.db
+*.db-shm
+*.db-wal
+
+# Serena MCP local project data
+.serena/
